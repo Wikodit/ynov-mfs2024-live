@@ -1,0 +1,958 @@
+<!doctype html>
+<body>
+  <canvas />
+  <script>
+    const MAX_ITER = 3000;
+    const CANVAS_SIZE = { width: 640, height: 480 };
+    const OccupancyType = {
+      Void: -1,
+      Available: 0,
+      Wall: 1,
+      Passage: 2,
+      Collector: 3,
+      Pipe: 4,
+      Object: 5,
+    };
+
+    const OccupancyColor = {
+      '-1': '#777777',
+      0: '#ffffff50',
+      1: '#222222',
+      2: '#00ffff',
+      3: '#ff00ff',
+      4: '#ff0000',
+      5: '#ffff00',
+    };
+
+    let iter = 0;
+    const [canvas] = document.getElementsByTagName('canvas');
+    canvas.width = CANVAS_SIZE.width;
+    canvas.height = CANVAS_SIZE.height;
+
+    // function drawPipes() {
+    //   const space = 10;
+    //   const collector = room.collectors[0];
+
+    //   const pipe = {
+    //     hot: {
+    //       x:
+    //         Math.abs((collector[0] - collector[2]) / 2) +
+    //         Math.min(collector[0], collector[2]),
+    //       y:
+    //         Math.abs((collector[1] - collector[3]) / 2) +
+    //         Math.min(collector[1], collector[3]) -
+    //         space / 2, // space/2 replace with correct offset
+    //       p: [],
+    //       l: 0,
+    //       c: '#ff0000',
+    //     },
+    //     cold: {
+    //       x:
+    //         Math.abs((collector[0] - collector[2]) / 2) +
+    //         Math.min(collector[0], collector[2]),
+    //       y:
+    //         Math.abs((collector[1] - collector[3]) / 2) +
+    //         Math.min(collector[1], collector[3]) +
+    //         space / 2, // space/2 replace with correct offset
+    //       p: []
+    //       l: 0,
+    //       c: '#0000ff',
+    //     },
+    //   };
+
+    //   // from the collector into the room
+    //   let dx = -space;
+    //   let dy = 0;
+
+    //   pipe.hot = drawPipeSegment(pipe.hot, dx, dy);
+    //   pipe.cold = drawPipeSegment(pipe.cold, dx, dy);
+
+    //   console.log(pipe);
+
+    // y += dy;
+    // colorToggle = !colorToggle;
+
+    // while (iterations < 1000) {
+    //   // Protection contre boucle infinie
+    //   // Tourner à droite et vérifier la collision. Si collision, continuer à tourner jusqu'à un chemin libre
+    //   [dx, dy] = turnRight(dx, dy);
+    //   while (isCollision(x + dx, y + dy, space)) {
+    //     [dx, dy] = turnRight(dx, dy);
+    //   }
+
+    //   // Dessiner le segment
+    //   drawPipeSegment(x, y, dx, dy, colorToggle ? 'red' : 'blue');
+    //   x += dx;
+    //   y += dy;
+    //   colorToggle = !colorToggle;
+
+    //   iterations++;
+    // }
+    // }
+
+    /** Utils **/
+
+    class Room {
+      constructor() {
+        this.walls = [];
+        this.collectors = [];
+        this.passages = [];
+        this.objects = [];
+        this.pipeSystems = [];
+        this.gridOccupancy = null;
+      }
+
+      static makeRoom(wallPoints) {
+        const room = new this();
+
+        wallPoints.forEach((point, i, arr) => {
+          const nextPoint = i === arr.length - 1 ? arr[0] : arr[i + 1];
+          room.addWall(point, nextPoint);
+        });
+
+        return room;
+      }
+
+      drawWalls(ctx) {
+        ctx.strokeStyle = '#000000';
+
+        this.walls.forEach(({ origin, end }) => {
+          ctx.beginPath();
+          ctx.moveTo(...origin);
+          ctx.lineTo(...end);
+          ctx.stroke();
+        });
+      }
+
+      drawPassages(ctx) {
+        const doorOffset = 5;
+
+        this.passages.forEach(({ baseline }) => {
+          pathObjForBaseline(ctx, baseline, doorOffset);
+
+          ctx.fillStyle = '#ffffff';
+          ctx.fill();
+
+          ctx.strokeStyle = '#2218AA';
+          ctx.stroke();
+        });
+      }
+
+      drawCollector(ctx) {
+        this.collectors.forEach(({ baseline }) => {
+          pathObjForBaseline(ctx, baseline, 3, 4);
+
+          ctx.fillStyle = '#ff0000';
+          ctx.fill();
+
+          pathObjForBaseline(ctx, baseline, 3, -4);
+
+          ctx.fillStyle = '#3035ff';
+          ctx.fill();
+        });
+      }
+
+      draw(ctx) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (this.gridOccupancy) this.gridOccupancy.draw(ctx);
+        this.drawWalls(ctx);
+        this.drawPassages(ctx);
+        this.drawCollector(ctx);
+
+        if (this.pipeSystems.length)
+          this.pipeSystems.forEach((pipeSystem) => pipeSystem.draw(ctx));
+      }
+
+      addPipes(pipes) {
+        this.pipeSystems = this.pipeSystems.concat(pipes);
+      }
+
+      addWall(origin, end) {
+        this.walls.push({ origin, end });
+      }
+
+      // addCollector(origin, orientation) { // todo better
+      addCollector(baseline) {
+        this.collectors.push({ baseline });
+      }
+
+      // addPassage(origin, orientation, width) { // todo better
+      addPassage(baseline) {
+        this.passages.push({ baseline });
+      }
+
+      addObject(origin, path, value) {
+        this.objects.push({ origin, path, value });
+      }
+
+      createGridOccupancy() {
+        this.gridOccupancy = new GridOccupancy(
+          1,
+          CANVAS_SIZE.width,
+          CANVAS_SIZE.height,
+        );
+
+        this.walls.forEach((wall, idx, arr) => {
+          if (idx > arr.length - 1) return;
+
+          const {
+            origin: [bX, bY],
+            end: [eX, eY],
+          } = wall;
+
+          this.gridOccupancy.markRect(
+            ...wall.origin,
+            ...wall.end,
+            OccupancyType.Wall,
+          );
+        });
+
+        this.gridOccupancy.floodFill(
+          ...this.findPointInside(),
+          OccupancyType.Void,
+          OccupancyType.Available,
+        );
+
+        this.passages.forEach(({ baseline }) =>
+          this.gridOccupancy.markRect(...baseline, OccupancyType.Passage),
+        );
+        this.collectors.forEach(({ baseline }) =>
+          this.gridOccupancy.markRect(...baseline, OccupancyType.Collector),
+        );
+      }
+
+      findPointInside() {
+        const raycasting = new HorizontalRaycasting(
+          this.walls.map(({ origin, end }) => [origin, end]),
+        );
+        return raycasting.findPointInside();
+      }
+    }
+
+    class PipeSystem {
+      constructor(gridOccupancy) {
+        this.grid = gridOccupancy;
+        this.pipes = { hot: [], cold: [] };
+        this.probeRadius = 10; // size of probe in front of the pipe
+        this.probeAngle = 180; // angle of the segment defined the area of the probe
+        this.maxRotationAngle = 90; // pipe max rotation in deg (abs value)
+        this.rotationStep = 90; // rotate 15 by 15
+        this.step = 5; // by how many px advance
+      }
+
+      addSegment(pipe, vector) {
+        pipe.push(vector);
+        this.grid.markVector(vector, OccupancyType.Pipe);
+      }
+
+      removeLastSegment(pipe) {
+        const vector = pipe.pop();
+        this.grid.markVector(vector, OccupancyType.Available);
+        return vector;
+      }
+
+      // returns the type, this way if we have a pipe as type, we can go back in history to find
+      // a solution
+      probe(targetVector) {
+        const [iniX, iniY, termX, termY] = targetVector.path;
+        const dirX = termX - iniX;
+        const dirY = termY - iniY;
+        const targetAngle = Math.atan2(dirY, dirX);
+
+        for (let x = -this.probeRadius; x <= this.probeRadius; x++) {
+          for (let y = -this.probeRadius; y <= this.probeRadius; y++) {
+            const checkX = termX + x;
+            const checkY = termY + y;
+
+            // Determine if the checking point is inside the circle
+            if (Math.sqrt(x * x + y * y) >= this.probeRadius) continue;
+
+            const toCheckX = checkX - termX;
+            const toCheckY = checkY - termY;
+            const checkAngle = Math.atan2(toCheckY, toCheckX);
+
+            let angleDifference = (targetAngle - checkAngle) * (180 / Math.PI);
+            if (angleDifference < 0) angleDifference += 360;
+
+            // Check if the point is outside the probeAngle
+            if (
+              angleDifference > this.probeAngle / 2 &&
+              angleDifference < 360 - this.probeAngle / 2
+            )
+              continue;
+
+            // Check grid boundaries and grid occupancy
+            if (
+              checkX < 0 ||
+              checkX >= this.grid.width ||
+              checkY < 0 ||
+              checkY >= this.grid.height
+            )
+              return false;
+
+            const value = this.grid.getPositionValue(checkX, checkY);
+            if (value !== OccupancyType.Available) return value;
+          }
+        }
+
+        return true;
+      }
+
+      traceFromCollector(collector, maxStep = MAX_ITER) {
+        const [cx1, cy1, cx2, cy2] = collector.baseline;
+
+        let pipes = {
+          cold: [Vector(cx1, cy1, cx1 - 10, cy1)],
+          hot: [Vector(cx2, cy2, cx2 - 10, cy2)],
+        };
+
+        let [current, nextCurrent] = ['hot', 'cold'];
+
+        let methodsData = {
+          removeLastSegmentCount: 0,
+          lastOtherPipeSegmentLocked: false, // whether it's possible to remove lastSegment
+          onlyLookForOtherPathThanVector: null,
+          backSegmentLocked: { cold: -1, hot: -1 }, // how many time ago there is a locked segment
+          rotationFactor: 1, // 1 for clockwize, -1 for anticlockwise, can be used to go from snail pattern to a snake pattern
+          deadEnd: false,
+        };
+        let i = 0;
+        mainLoop: while (i++ < maxStep) {
+          const pipe = pipes[current];
+
+          scanBlock: {
+            const lastVector = pipe[pipe.length - 1];
+            const nextContinuousVector = Vector(
+              // same direction
+              lastVector.terminalPoint,
+              Vector.addMagnitude(lastVector, this.step).terminalPoint,
+            );
+
+            let lastProbe = null;
+
+            // Rotation method, we start at -maxRotationAngle, and finish at +maxRotationAngle
+            let j = 0;
+            let angleWithTarget =
+              -this.maxRotationAngle * methodsData.rotationFactor;
+
+            rotationLoop: while (j++ < MAX_ITER) {
+              // should run one time for each possible rotation
+              // We continue previous by step, and then try to apply maximum possible angle
+              let targetVector = Vector.addAngle(
+                nextContinuousVector,
+                angleWithTarget,
+              );
+
+              lastProbe = this.probe(targetVector);
+
+              // ignore when we need to look for another path
+              if (
+                methodsData.onlyLookForOtherPathThanVector === null ||
+                !Vector.angle(
+                  targetVector,
+                  methodsData.onlyLookForOtherPathThanVector,
+                )
+              ) {
+                if (this.probe(targetVector) === true) {
+                  // when we onlyLookForOtherPathThanVector, we don't add the segment
+                  if (methodsData.onlyLookForOtherPathThanVector)
+                    break scanBlock;
+
+                  this.addSegment(pipes[current], targetVector);
+                  break scanBlock;
+                }
+              }
+
+              // get angleWithTarget near to maxRotationAngle
+              angleWithTarget += this.rotationStep * methodsData.rotationFactor;
+
+              if (
+                angleWithTarget > this.maxRotationAngle ||
+                angleWithTarget < -this.maxRotationAngle
+              )
+                break rotationLoop;
+            }
+
+            // sometime a pipe goes faster than the other, so let's remove the opposite pipe last
+            // segment and try again
+            curIf: if (methodsData.removeLastSegmentCount < 10) {
+              // To avoid case when one pipe remove the segment of the other, and the other do the
+              // same again and again
+
+              // Like we will remove a segment, we decrement the count until the last locked segment
+              // todo: maybe the segment we are removing is a locked one ??
+              methodsData.backSegmentLocked[current] =
+                methodsData.backSegmentLocked[current] === -1
+                  ? -1
+                  : methodsData.backSegmentLocked[current] - 1;
+
+              // When the other pipe segment is locked, and we still can't find a direction,
+              // we need to go back ourself in time until we find another path than the previous one
+              // and give back the hand to the other pipe without taking the found path yet
+              if (
+                methodsData.lastOtherPipeSegmentLocked ||
+                (methodsData.backSegmentLocked > 0 &&
+                  methodsData.backSegmentLocked < 5)
+              ) {
+                // methodsData.onlyLookForOtherPathThanVector =
+                //   this.removeLastSegment(pipes[current]);
+                // continue;
+                methodsData.deadEnd = true;
+                break curIf;
+              }
+
+              // simple case, just remove other pipe segment and try again to advance
+              this.removeLastSegment(pipes[nextCurrent]);
+              methodsData.removeLastSegmentCount += 1;
+
+              // methodsData.deadEnd = true; // continue with same pipe
+              continue;
+            }
+
+            // next resolution methods goes there
+            break mainLoop;
+          }
+
+          methodsData = {
+            deadEnd: false, //methodsData.deadEnd,
+            removeLastSegmentCount: 0,
+
+            // to avoid infinite adding/removing last segment
+            lastOtherPipeSegmentLocked: methodsData.removeLastSegmentCount > 0,
+            backSegmentLocked: {
+              hot:
+                methodsData.backSegmentLocked.hot === -1
+                  ? -1
+                  : methodsData.backSegmentLocked.hot + 1,
+              cold:
+                methodsData.backSegmentLocked.hot === -1
+                  ? -1
+                  : methodsData.backSegmentLocked.cold + 1,
+            },
+
+            onlyLookForOtherPathThanVector: null,
+            rotationFactor: methodsData.deadEnd ? -1 : 1,
+          }; // reset when it finaly works
+
+          if (methodsData.lastOtherPipeSegmentLocked) {
+            methodsData.backSegmentLocked[current] = 0;
+          }
+
+          // otherwise continue same pipe
+          if (!methodsData.deadEnd) {
+            [current, nextCurrent] =
+              current === 'hot' ? ['cold', 'hot'] : ['hot', 'cold'];
+          }
+        }
+
+        console.log(i);
+
+        this.pipes = this.equilibratePipes(pipes);
+      }
+
+      equilibratePipes(pipes) {
+        // cold pipe and hot pipe should have same length
+        return pipes;
+      }
+
+      draw(ctx) {
+        console.log(this.pipes);
+        ctx.strokeStyle = '#ff0000'; // Hot pipe
+        this.pipes.hot.forEach((vector) => {
+          ctx.beginPath();
+          ctx.moveTo(...vector.initialPoint);
+          ctx.lineTo(...vector.terminalPoint);
+          ctx.stroke();
+        });
+
+        ctx.strokeStyle = '#0000ff'; // Cold pipe
+        this.pipes.cold.forEach((vector) => {
+          ctx.beginPath();
+          ctx.moveTo(...vector.initialPoint);
+          ctx.lineTo(...vector.terminalPoint);
+          ctx.stroke();
+        });
+      }
+    }
+
+    class GridOccupancy {
+      constructor(cellSize, width, height) {
+        this.cellSize = cellSize;
+        this.cols = width / cellSize;
+        this.rows = height / cellSize;
+
+        this.grid = new Array(this.rows)
+          .fill(null)
+          .map(() => new Array(this.cols).fill(OccupancyType.Void));
+      }
+
+      draw(ctx) {
+        console.time('drawGridOccupancy');
+        const { cellSize } = this;
+        let currentColor, startCol;
+
+        for (let row = 0; row < this.grid.length; row++) {
+          startCol = 0;
+          currentColor = OccupancyColor[this.grid[row][startCol]];
+
+          for (let col = 1; col < this.grid[row].length; col++) {
+            if (OccupancyColor[this.grid[row][col]] !== currentColor) {
+              ctx.fillStyle = currentColor;
+              ctx.fillRect(
+                startCol * cellSize,
+                row * cellSize,
+                (col - startCol) * cellSize,
+                cellSize,
+              );
+              startCol = col;
+              currentColor = OccupancyColor[this.grid[row][col]];
+            }
+          }
+
+          ctx.fillStyle = currentColor;
+          ctx.fillRect(
+            startCol * cellSize,
+            row * cellSize,
+            (this.grid[row].length - startCol) * cellSize,
+            cellSize,
+          );
+        }
+        console.timeEnd('drawGridOccupancy');
+      }
+
+      floodFill(x, y, target, replacement) {
+        if (this.grid[y][x] !== target) return;
+
+        let stack = [[x, y]];
+
+        while (stack.length > 0) {
+          let [cx, cy] = stack.pop();
+
+          if (cx < 0 || cx >= this.cols || cy < 0 || cy >= this.rows) continue;
+          if (this.grid[cy][cx] !== target) continue;
+
+          this.grid[cy][cx] = replacement;
+
+          stack.push([cx + 1, cy]);
+          stack.push([cx - 1, cy]);
+          stack.push([cx, cy + 1]);
+          stack.push([cx, cy - 1]);
+        }
+      }
+
+      // Bresenham's line algorithm
+      markVector(vector, occupancyType) {
+        const [x1, y1] = vector.initialPoint;
+        const [x2, y2] = vector.terminalPoint;
+
+        let x = x1,
+          y = y1;
+        const dx = Math.abs(x2 - x1);
+        const dy = Math.abs(y2 - y1);
+        const sx = x1 < x2 ? 1 : -1;
+        const sy = y1 < y2 ? 1 : -1;
+        let err = dx - dy;
+
+        while (true) {
+          this.grid[y][x] = occupancyType;
+
+          if (x === x2 && y === y2) break;
+
+          const e2 = 2 * err;
+          if (e2 > -dy) {
+            err -= dy;
+            x += sx;
+          }
+          if (e2 < dx) {
+            err += dx;
+            y += sy;
+          }
+        }
+      }
+
+      markRect(x1, y1, x2, y2, occupancyType) {
+        const startCol = Math.min(
+          Math.floor(x1 / this.cellSize),
+          Math.floor(x2 / this.cellSize),
+        );
+        const endCol = Math.max(
+          Math.floor(x1 / this.cellSize),
+          Math.floor(x2 / this.cellSize),
+        );
+        const startRow = Math.min(
+          Math.floor(y1 / this.cellSize),
+          Math.floor(y2 / this.cellSize),
+        );
+        const endRow = Math.max(
+          Math.floor(y1 / this.cellSize),
+          Math.floor(y2 / this.cellSize),
+        );
+
+        for (let row = startRow; row <= endRow; row++) {
+          for (let col = startCol; col <= endCol; col++) {
+            this.grid[row][col] = occupancyType;
+          }
+        }
+      }
+
+      isPositionFree(x, y, magnitude = 0) {
+        return this.isCellFree(
+          Math.round(y / this.cellSize),
+          Math.round(x / this.cellSize),
+          Math.round(magnitude / this.cellSize),
+        );
+      }
+
+      getPositionValue(x, y) {
+        return this.getCellValue(
+          Math.round(y / this.cellSize),
+          Math.round(x / this.cellSize),
+        );
+      }
+
+      getCellValue(r, c) {
+        return this.grid[r][c];
+      }
+
+      isCellFree(row, col, range = 0) {
+        const startRow = Math.max(row - range, 0);
+        const endRow = Math.min(row + range, this.rows - 1);
+        const startCol = Math.max(col - range, 0);
+        const endCol = Math.min(col + range, this.cols - 1);
+
+        for (let r = startRow; r <= endRow; r++) {
+          for (let c = startCol; c <= endCol; c++) {
+            if (this.grid[r][c] !== OccupancyType.Available) {
+              return false;
+            }
+          }
+        }
+        return true;
+      }
+    }
+
+    // To find a point definitely inside the room for flood filling
+    class HorizontalRaycasting {
+      // boundaries are walls
+      constructor(boundaries) {
+        this.boundaries = boundaries;
+      }
+
+      // is the point on a line?
+      onSegment(p, q, r) {
+        return (
+          q[0] <= Math.max(p[0], r[0]) &&
+          q[0] >= Math.min(p[0], r[0]) &&
+          q[1] <= Math.max(p[1], r[1]) &&
+          q[1] >= Math.min(p[1], r[1])
+        );
+      }
+
+      areEqual(p1, p2) {
+        return p1[0] === p2[0] && p1[1] === p2[1];
+      }
+
+      // find orietation of an ordered triplet (p, q, r)
+      // positive for counterclockwise, negative for clockwise, and zero for collinear
+      orientation(p, q, r) {
+        const val =
+          (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1]);
+        if (val == 0) return 0;
+        return val > 0 ? 1 : 2;
+      }
+
+      doIntersect(p1, q1, p2, q2) {
+        const o1 = this.orientation(p1, q1, p2);
+        const o2 = this.orientation(p1, q1, q2);
+        const o3 = this.orientation(p2, q2, p1);
+        const o4 = this.orientation(p2, q2, q1);
+
+        if (o1 != o2 && o3 != o4) return true;
+
+        if (o1 == 0 && this.onSegment(p1, p2, q1)) return false; // intersect at end of vertex
+        if (o2 == 0 && this.onSegment(p1, q2, q1)) return true; // intersects at start of vertex
+        if (o3 == 0 && this.onSegment(p2, p1, q2)) return false; // intersect at end of vertext
+        if (o4 == 0 && this.onSegment(p2, q1, q2)) return true; // intersects at start of vertex
+
+        return false;
+      }
+
+      findPointInside() {
+        for (let y = 0; y < CANVAS_SIZE.height; y++) {
+          for (let x = 0; x < CANVAS_SIZE.width; x++) {
+            let testPoint = [x, y];
+            const extremePoint = [CANVAS_SIZE.width + 1, y];
+
+            let count = 0;
+
+            for (let i = 0; i < this.boundaries.length; i++) {
+              const [start, end] = this.boundaries[i];
+              const result = this.doIntersect(
+                testPoint,
+                extremePoint,
+                start,
+                end,
+              );
+
+              if (result === true) {
+                count++;
+              }
+            }
+
+            if (count % 2 == 1) return testPoint;
+          }
+        }
+
+        throw new Error('The room is a lie...');
+      }
+    }
+
+    // function turnRight(dx, dy) {
+    //   if (dx === 0 && dy === 10) return [10, 0];
+    //   if (dx === 10 && dy === 0) return [0, -10];
+    //   if (dx === 0 && dy === -10) return [-10, 0];
+    //   if (dx === -10 && dy === 0) return [0, 10];
+    // }
+
+    // function drawPipeSegment({ x, y, l, c }, dx, dy) {
+    //   ctx.strokeStyle = c;
+    //   ctx.beginPath();
+    //   ctx.moveTo(x, y);
+    //   ctx.lineTo(x + dx, y + dy);
+    //   ctx.stroke();
+
+    //   const dl = Math.sqrt(dx * dx + dy * dy);
+
+    //   return { x: x + dx, y: y + dy, l: l + dl, c };
+    // }
+
+    // function isCollision(x, y, space) {
+    //   // against walls
+    //   for (let i = 0; i < room.walls.length - 1; i++) {
+    //     const [x1, y1] = room.walls[i];
+    //     const [x2, y2] = room.walls[i + 1];
+    //     if (lineCollision(x, y, x + space, y + space, x1, y1, x2, y2))
+    //       return true;
+    //   }
+
+    //   // against passages
+    //   for (let passage of room.passages) {
+    //     const [x1, y1, x2, y2] = passage;
+    //     if (lineCollision(x, y, x + space, y + space, x1, y1, x2, y2))
+    //       return true;
+    //   }
+
+    //   return false;
+    // }
+
+    // function lineCollision(x1, y1, x2, y2, x3, y3, x4, y4) {
+    //   const det = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+    //   if (det === 0) return false;
+
+    //   const lambda = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / det;
+    //   const gamma = ((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / det;
+
+    //   return 0 < lambda && lambda < 1 && 0 < gamma && gamma < 1;
+    // }
+
+    // Add a special Vector type
+    (() => {
+      class VectorBase {
+        get magnitude() {
+          const [x, y] = this.direction;
+          return Math.sqrt(x * x + y * y);
+        }
+
+        get length() {
+          return this.magnitude;
+        }
+
+        get points() {
+          return this.path.reduce((r, v, i, arr) => {
+            if (i % 2 === 0) r.push(arr.slice(i, i + 2));
+            return r;
+          }, []);
+        }
+
+        get direction() {
+          const [start, end] = [this.path.slice(0, 2), this.path.slice(-2)];
+          return [end[0] - start[0], end[1] - start[1]];
+        }
+
+        get initialPoint() {
+          return this.points[0];
+        }
+
+        get terminalPoint() {
+          return this.points[1];
+        }
+
+        // Used to shorten vectors number, by adding the consecutive ones that have same direction
+        static minifyVectors(vectors) {
+          return vectors.reduce((acc, v, i, arr) => {
+            const lastVector = pipe[pipe.length - 1] ?? null;
+
+            // no need to add a new vector if the direction is the same, we just add it to the previous
+            if (lastVector && Vector.angle(lastVector, vector) === 0) {
+              arr[vector.length - 1] = Vector.add(lastVector, vector);
+            } else {
+              arr.push(vector);
+            }
+          }, []);
+        }
+
+        static angle(vectorA, vectorB) {
+          const dA = vectorA.direction;
+          const dB = vectorB.direction;
+          const dot = dA[0] * dB[0] + dA[1] * dB[1];
+          const det = dA[0] * dB[1] - dA[1] * dB[0];
+          const angle = Math.atan2(det, dot);
+          return Math.abs(angle * (180 / Math.PI));
+        }
+
+        static equals(vectorA, vectorB) {
+          return vectorA[0] === vectorB[0] && vectorA[1] === vectorB[1];
+        }
+
+        static createFromDirection(position, direction) {
+          return Vector.add(
+            Vector(...position, ...position), // single point
+            direction instanceof Vector ? direction : Vector(direction),
+          );
+        }
+
+        static addAngle(vector, angle = 0) {
+          const rad = (angle * Math.PI) / 180;
+          const sinRad = Math.sin(rad);
+          const cosRad = Math.cos(rad);
+
+          const [dx, dy] = vector.direction;
+
+          const newDirectionX = dx * cosRad - dy * sinRad;
+          const newDirectionY = dx * sinRad + dy * cosRad;
+
+          const [x, y] = vector.initialPoint;
+          return Vector(x, y, x + newDirectionX, y + newDirectionY);
+        }
+
+        static addMagnitude(vector, magnitude) {
+          const currentMagnitude = vector.magnitude;
+          const scaleFactor = (currentMagnitude + magnitude) / currentMagnitude;
+
+          // Scale the direction with the new magnitude
+          const tx = Math.ceil(vector.direction[0] * scaleFactor);
+          const ty = Math.ceil(vector.direction[1] * scaleFactor);
+
+          const [x, y] = vector.initialPoint;
+
+          return Vector(x, y, tx + x, ty + y);
+        }
+
+        // position of vector2 is ignored, only direction matters
+        static add(vector1, vector2) {
+          const [x1, y1] = vector1.initialPoint;
+          const [x2, y2] = vector1.terminalPoint;
+          const [dx, dy] = vector2.direction;
+          return Vector(x1, y1, x2 + dx, y2 + dy);
+        }
+
+        // position of vector2 is ignored, only direction matters
+        static substract(vector1, vector2) {
+          const [x1, y1] = vector1.initialPoint;
+          const [x2, y2] = vector1.terminalPoint;
+          const [dx, dy] = vector2.direction;
+          return Vector(x1, y1, x2 - dx, y2 - dy);
+        }
+      }
+
+      /**
+       * Vector(x1,y1,x2,y2)
+       * Vector([x1,y1,x2,y2])
+       * Vector([x1,y1],[x2,y2])
+       * Vector([x2,y2]) first point default to 0,0
+       * Vector(x2,y2) first point default to 0,0
+       */
+      function Vector(attr1, attr2, ...attrs) {
+        const vector = Object.create(Vector.prototype);
+        vector.path =
+          Array.isArray(attr2) && Array.isArray(attr1)
+            ? [...attr1, ...attr2] // Vector([x1,y1],[x2,y2])
+            : Array.isArray(attr1)
+            ? [...attr1] // Vector([x1,y1,x2,y2]) or Vector([x2,y2])
+            : [attr1, attr2, ...attrs]; // Vector(x1,y1,x2,y2) or Vector(x2,y2)
+
+        // x1,y1 default to 0,0 when Vector([x2,y2]) or Vector(x2,y2)
+        if (vector.path.length === 2) vector.path.unshift(0, 0);
+
+        if (vector.path.length !== 4)
+          throw new Error('A vector must consist of 2 points (x, y)');
+
+        return vector;
+      }
+      Vector.__proto__ = VectorBase;
+      Vector.prototype.__proto__ = VectorBase.prototype;
+      window.Vector = Vector;
+    })();
+
+    function pathObjForBaseline(ctx, baseline, weight, offset = 0) {
+      const [dx, dy] = getDeltaOffsetLine(weight, baseline);
+      const [bx, by, ex, ey] = baseline;
+
+      ctx.beginPath();
+
+      ctx.lineTo(bx - dx + offset, by - dy);
+      ctx.lineTo(bx + dx + offset, by + dy);
+      ctx.lineTo(ex + dx + offset, ey + dy);
+      ctx.lineTo(ex - dx + offset, ey - dy);
+      ctx.lineTo(bx - dx + offset, by - dy);
+    }
+
+    function getDeltaOffsetLine(offset, line) {
+      let dx, dy;
+      const [bx, by, ex, ey] = line;
+
+      if (bx === ex) {
+        dx = offset;
+        dy = 0;
+      } else if (by === ey) {
+        dx = 0;
+        dy = offset;
+      } else {
+        const slope = (ey - by) / (ex - bx);
+        const pSlope = -1 / slope;
+        dx = offset / Math.pow(1 + pSlope * pSlope);
+        dy = pSlope * dx;
+      }
+
+      return [dx, dy];
+    }
+
+    /** MAIN **/
+
+    window.run = (loopStep = 10000) => {
+      const room = Room.makeRoom([
+        [20, 20],
+        [420, 20],
+        [420, 300],
+        [380, 300],
+        [380, 400],
+        [20, 400],
+      ]);
+      console.log(room);
+
+      room.addPassage([290, 400, 373, 400]);
+      room.addCollector([380, 320, 380, 360]);
+
+      room.createGridOccupancy();
+
+      const pipes = new PipeSystem(room.gridOccupancy);
+      pipes.traceFromCollector(room.collectors[0], loopStep);
+
+      room.addPipes(pipes);
+
+      const ctx = canvas.getContext('2d');
+      room.draw(ctx);
+    };
+    run();
+  </script>
+</body>
